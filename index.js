@@ -1,122 +1,146 @@
 const express = require("express");
 const axios = require("axios");
-
 const app = express();
 app.use(express.json());
 
-// ── ENV VARIABLES
-const TOKEN = process.env.ACCESS_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const CHAT_ID = process.env.CHAT_ID;
 
-// ⚠️ WhatsApp Cloud API does NOT support groups directly
-// const GROUP_ID = process.env.GROUP_ID;
+// ── In-memory order store
+const orders = {};
 
-// ── WEBHOOK VERIFICATION (Meta uses this)
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("✅ Webhook verified");
-    return res.status(200).send(challenge);
-  }
-
-  res.sendStatus(403);
+// ── CORS so website can talk to this bot
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
 });
 
-// ── RECEIVE MESSAGES
-app.post("/webhook", async (req, res) => {
+// ── Receive order from website
+app.post("/order", async (req, res) => {
   try {
-    const body = req.body;
+    const { orderNum, name, phone, items, total, payMethod, residence } = req.body;
 
-    const entry = body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
+    // Save order in memory
+    orders[orderNum] = {
+      orderNum, name, phone, items, total, payMethod,
+      status: "pending",
+      date: new Date().toISOString()
+    };
 
-    const messages = value?.messages;
+   
+    let msg = `🍔 *NEW LITEBITE ORDER!*\n`;
+    msg += `━━━━━━━━━━━━━━━━━━\n`;
+    msg += `🔢 *Order:* #${orderNum}\n`;
+    msg += `👤 *Name:* ${name}\n`;
+    msg += `📞 *Phone:* [${phone}](tel:${phone})\n`;
+    if (residence) msg += `🎓 *NMU Residence:* ${residence}\n`;
+    msg += `💳 *Payment:* ${payMethod === "eft" ? "💳 EFT (awaiting proof)" : "💵 Cash on collection"}\n`;
+    msg += `━━━━━━━━━━━━━━━━━━\n`;
 
-    if (!messages || messages.length === 0) {
-      return res.sendStatus(200);
+    const nmuItems = items.filter(i => i.nmu);
+    const colItems = items.filter(i => !i.nmu);
+
+    if (nmuItems.length) {
+      msg += `🎓 *NMU DELIVERY (13:30–14:20):*\n`;
+      nmuItems.forEach(i => {
+        msg += `• ${i.emoji} ${i.name} x${i.qty} — R${i.price * i.qty}\n`;
+        if (i.removed && i.removed.length) msg += `  ❌ Remove: ${i.removed.join(", ")}\n`;
+        if (i.extras && i.extras.length) msg += `  ➕ Add: ${i.extras.join(", ")}\n`;
+        if (i.note) msg += `  📝 ${i.note}\n`;
+      });
+    }
+    if (colItems.length) {
+      msg += `🏠 *COLLECT AT RESTAURANT:*\n`;
+      colItems.forEach(i => {
+        msg += `• ${i.emoji} ${i.name} x${i.qty} — R${i.price * i.qty}\n`;
+        if (i.removed && i.removed.length) msg += `  ❌ Remove: ${i.removed.join(", ")}\n`;
+        if (i.extras && i.extras.length) msg += `  ➕ Add: ${i.extras.join(", ")}\n`;
+        if (i.note) msg += `  📝 ${i.note}\n`;
+      });
     }
 
-    const msg = messages[0];
+    msg += `━━━━━━━━━━━━━━━━━━\n`;
+    msg += `💰 *TOTAL: R${total}*\n`;
+    msg += payMethod === "eft"
+      ? `🏦 TymeBank: 5102 9549 181\n⚠️ Awaiting proof of payment!`
+      : `💵 Customer paying CASH on collection`;
 
-    const from = msg.from;
-    const text = msg.text?.body || "(non-text message)";
-    const customerName =
-      value?.contacts?.[0]?.profile?.name || "Customer";
+ 
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      chat_id: CHAT_ID,
+      text: msg,
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "✅ Mark Ready", callback_data: `ready_${orderNum}` },
+          { text: "📦 Mark Collected", callback_data: `collected_${orderNum}` }
+        ]]
+      }
+    });
 
-    console.log("📩 Incoming message:");
-    console.log("From:", from);
-    console.log("Name:", customerName);
-    console.log("Text:", text);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Order error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
-    // ── FORMAT ORDER MESSAGE
-    const orderMessage =
-      `🍔 *New LiteBite Order!*\n\n` +
-      `👤 Customer: ${customerName}\n` +
-      `📞 Number: +${from}\n\n` +
-      `📋 Message:\n${text}`;
+// ── Telegram button clicks (✅ Ready / 📦 Collected)
+app.post("/telegram", async (req, res) => {
+  try {
+    const callback = req.body.callback_query;
+    if (!callback) return res.sendStatus(200);
 
-    // ⚠️ Instead of GROUP (not supported), log it or send to admin number
-    console.log("📦 ORDER:", orderMessage);
+    const data = callback.data;
+    const messageId = callback.message.message_id;
+    const chatId = callback.message.chat.id;
 
-    // ── AUTO REPLY TO CUSTOMER
-    const replyMessage =
-      `Hi ${customerName}! 👋\n\n` +
-      `✅ We received your order!\n\n` +
-      `🍔 LiteBite Fast Food\n` +
-      `We're preparing it now.\n\n` +
-      `📞 Contact us if needed:\n` +
-      `• Mr Delivery: 063 893 0467\n` +
-      `• Restaurant: 071 230 8271\n\n` +
-      `🏦 Payment: TymeBank\n` +
-      `⚠️ Please send proof of payment!`;
+    if (data.startsWith("ready_") || data.startsWith("collected_")) {
+      const [status, orderNum] = data.split("_");
 
-    await sendMessage(from, replyMessage);
+      if (orders[orderNum]) {
+        orders[orderNum].status = status;
+        const label = status === "ready" ? "✅ READY for collection!" : "📦 COLLECTED";
+
+        // Update button in Telegram to show status
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/editMessageReplyMarkup`, {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: {
+            inline_keyboard: [[
+              { text: `${label} — #${orderNum}`, callback_data: "done" }
+            ]]
+          }
+        });
+
+        // Notify the person who tapped the button
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/answerCallbackQuery`, {
+          callback_query_id: callback.id,
+          text: `Order #${orderNum} marked as ${label}`,
+          show_alert: false
+        });
+      }
+    }
 
     res.sendStatus(200);
-  } catch (error) {
-    console.error("❌ Error processing webhook:", error.message);
-    res.sendStatus(500);
-  }
-});
-
-// ── SEND MESSAGE FUNCTION
-async function sendMessage(to, text) {
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to: to,
-        type: "text",
-        text: { body: text },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    console.log("✅ Message sent to:", to);
   } catch (err) {
-    console.error("❌ Failed to send message:", err.response?.data || err.message);
+    console.error("Callback error:", err.message);
+    res.sendStatus(200);
   }
-}
-
-// ── TEST ROUTE (for checking if server is alive)
-app.get("/test", (req, res) => {
-  res.send("🚀 LiteBite bot is running!");
 });
 
-// ── START SERVER
-const PORT = process.env.PORT || 10000;
-
-app.listen(PORT, () => {
-  console.log(`🚀 LiteBite bot running on port ${PORT}`);
+// ── Website polls this to get order status
+app.get("/status/:orderNum", (req, res) => {
+  const order = orders[req.params.orderNum.toUpperCase()];
+  if (!order) return res.json({ ok: false, status: "not_found" });
+  res.json({ ok: true, status: order.status, orderNum: order.orderNum, name: order.name });
 });
+
+// ── Health check
+app.get("/", (req, res) => res.send("LiteBite Bot is running! 🍔"));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`LiteBite bot running on port ${PORT}`));
