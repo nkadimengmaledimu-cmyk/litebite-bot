@@ -147,6 +147,22 @@ app.post("/telegram", async (req, res) => {
   }
 });
 
+// Admin secret – read from environment variable
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
+
+app.post("/admin/update", (req, res) => {
+  const { orderNum, status, secret } = req.body;
+  if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
+    return res.status(403).json({ error: "Unauthorized" });
+  }
+  if (orders[orderNum]) {
+    orders[orderNum].status = status;
+    res.json({ ok: true });
+  } else {
+    res.json({ ok: false, error: "Order not found" });
+  }
+});
+
 app.get("/status/:orderNum", (req, res) => {
   const order = orders[req.params.orderNum.toUpperCase()];
   if (!order) return res.json({ ok: false, status: "not_found" });
