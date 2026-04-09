@@ -1,24 +1,3 @@
-const express = require("express");
-const axios = require("axios");
-const app = express();
-app.use(express.json());
-
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const CHAT_ID = process.env.CHAT_ID;
-
-// ── In-memory order store
-const orders = {};
-
-// ── CORS so website can talk to this bot
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Content-Type");
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-
-// ── Receive order from website
 app.post("/order", async (req, res) => {
   try {
     const { orderNum, name, phone, items, total, payMethod, residence } = req.body;
@@ -30,12 +9,14 @@ app.post("/order", async (req, res) => {
       date: new Date().toISOString()
     };
 
-    // Get current date and time (South African format)
+    // Get current date and time (manual formatting, works everywhere)
     const now = new Date();
-    const formattedDateTime = now.toLocaleString('en-ZA', {
-      dateStyle: 'medium',
-      timeStyle: 'short'
-    });
+    const day = String(now.getDate()).padStart(2, '0');
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const year = now.getFullYear();
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const formattedDateTime = `${day}/${month}/${year} at ${hours}:${minutes}`;
 
     let msg = `🍔 *NEW LITEBITE ORDER!*\n`;
     msg += `📅 *Date/Time:* ${formattedDateTime}\n`;
@@ -93,60 +74,3 @@ app.post("/order", async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-
-// ── Telegram button clicks (✅ Ready / 📦 Collected)
-app.post("/telegram", async (req, res) => {
-  try {
-    const callback = req.body.callback_query;
-    if (!callback) return res.sendStatus(200);
-
-    const data = callback.data;
-    const messageId = callback.message.message_id;
-    const chatId = callback.message.chat.id;
-
-    if (data.startsWith("ready_") || data.startsWith("collected_")) {
-      const [status, orderNum] = data.split("_");
-
-      if (orders[orderNum]) {
-        orders[orderNum].status = status;
-        const label = status === "ready" ? "✅ READY for collection!" : "📦 COLLECTED";
-
-        // Update button in Telegram to show status
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/editMessageReplyMarkup`, {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: {
-            inline_keyboard: [[
-              { text: `${label} — #${orderNum}`, callback_data: "done" }
-            ]]
-          }
-        });
-
-        // Notify the person who tapped the button
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/answerCallbackQuery`, {
-          callback_query_id: callback.id,
-          text: `Order #${orderNum} marked as ${label}`,
-          show_alert: false
-        });
-      }
-    }
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("Callback error:", err.message);
-    res.sendStatus(200);
-  }
-});
-
-// ── Website polls this to get order status
-app.get("/status/:orderNum", (req, res) => {
-  const order = orders[req.params.orderNum.toUpperCase()];
-  if (!order) return res.json({ ok: false, status: "not_found" });
-  res.json({ ok: true, status: order.status, orderNum: order.orderNum, name: order.name });
-});
-
-// ── Health check
-app.get("/", (req, res) => res.send("LiteBite Bot is running! 🍔"));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`LiteBite bot running on port ${PORT}`));
