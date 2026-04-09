@@ -30,15 +30,22 @@ app.post("/order", async (req, res) => {
       date: new Date().toISOString()
     };
 
-   
+    // Get current date and time (South African format)
+    const now = new Date();
+    const formattedDateTime = now.toLocaleString('en-ZA', {
+      dateStyle: 'medium',
+      timeStyle: 'short'
+    });
+
     let msg = `🍔 *NEW LITEBITE ORDER!*\n`;
-    msg += `━━━━━━━━━━━━━━━━━━\n`;
+    msg += `📅 *Date/Time:* ${formattedDateTime}\n`;
+    msg += `━━━━━━━━━━━━\n`;
     msg += `🔢 *Order:* #${orderNum}\n`;
     msg += `👤 *Name:* ${name}\n`;
     msg += `📞 *Phone:* [${phone}](tel:${phone})\n`;
     if (residence) msg += `🎓 *NMU Residence:* ${residence}\n`;
     msg += `💳 *Payment:* ${payMethod === "eft" ? "💳 EFT (awaiting proof)" : "💵 Cash on collection"}\n`;
-    msg += `━━━━━━━━━━━━━━━━━━\n`;
+    msg += `━━━━━━━━━━━━\n`;
 
     const nmuItems = items.filter(i => i.nmu);
     const colItems = items.filter(i => !i.nmu);
@@ -62,13 +69,12 @@ app.post("/order", async (req, res) => {
       });
     }
 
-    msg += `━━━━━━━━━━━━━━━━━━\n`;
+    msg += `━━━━━━━━━━━━\n`;
     msg += `💰 *TOTAL: R${total}*\n`;
     msg += payMethod === "eft"
       ? `🏦 TymeBank: 5102 9549 181\n⚠️ Awaiting proof of payment!`
       : `💵 Customer paying CASH on collection`;
 
- 
     await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
       chat_id: CHAT_ID,
       text: msg,
